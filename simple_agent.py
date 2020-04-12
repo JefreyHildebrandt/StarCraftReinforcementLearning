@@ -3,6 +3,8 @@ import sys
 import random
 import keras
 import datetime
+import pickle
+import os.path
 
 from keras.models import Sequential
 from keras.layers import Dense, Flatten, Conv2D, Activation, MaxPooling2D, TimeDistributed, LSTM, Reshape, Dropout
@@ -49,6 +51,8 @@ SAVE_MODEL = True
  
 episode_reward = 0
 observation_cur = None
+logInfo = []
+episode_count = 0
  
 # Configure Flags for executing model from console
  
@@ -77,7 +81,9 @@ class SC2Proc(Processor):
         batch = np.swapaxes(batch, 0, 1)
         return batch[0]
  
- 
+
+def check_if_action_is_available(obs, action):
+    return action in obs.observation.available_actions
  
 def args_random(actfunc):
     # E.g. of actfunc: pysc2.lib.actions.FUNCTIONS[81]
@@ -122,11 +128,16 @@ class Environment(sc2_env.SC2Env):
         r = obs[0].reward
         done = obs[0].step_type == environment.StepType.LAST
         episode_reward += r
+
+        if(done):
+            global episode_count
+            global logInfo
+            episode_count += 1
+            logInfo.append([episode_count, episode_reward, obs[0].observation.score_by_category.sum().tolist()])
  
         return observation, r, done, {}
  
     def reset(self):
-        global episode_reward
         episode_reward = 0
         super(Environment, self).reset()
  
@@ -177,7 +188,7 @@ def training_game():
     env = Environment(map_name="HitAndRun",
                 players=[sc2_env.Agent(sc2_env.Race.zerg),
                         sc2_env.Bot(sc2_env.Race.random,
-                                    sc2_env.Difficulty.very_easy)], visualize=True, game_steps_per_episode=150,
+                                    sc2_env.Difficulty.very_easy)], visualize=False, game_steps_per_episode=1000,
                       agent_interface_format=features.AgentInterfaceFormat(
                           feature_dimensions=features.Dimensions(screen=64, minimap=32)
                       ))
@@ -200,7 +211,7 @@ def training_game():
     dqn = DQNAgent(model=model, nb_actions=nb_actions, memory=memory, enable_double_dqn=True,
                    enable_dueling_network=True,
                    nb_steps_warmup=500, target_model_update=1e-2, policy=policy,
-                   batch_size=150,
+                   batch_size=125,
                    processor=processor,
                    delta_clip=1)
  
@@ -226,20 +237,26 @@ def training_game():
     log_file = "training_w_{}_log.json".format(name)
 
 
-    # if LOAD_MODEL:
-    #     dqn.load_weights(w_file)
+    if LOAD_MODEL and os.path.isfile(w_file):
+        dqn.load_weights(w_file)
 
     class Saver(Callback):
         def on_episode_end(self, episode, logs={}):
-            if episode % 200 == 0:
+            if episode % 100 == 0:
                 self.model.save_weights(w_file, overwrite=True)
+                global logInfo
+                pickle.dump(logInfo, open("training_info.pkl", "wb"))
+                
 
     s = Saver()
     logs = FileLogger('DQN_Agent_log.csv', interval=1)
 
-    dqn.fit(env, callbacks=[callbacks,s,logs], nb_steps=600, action_repetition=2,
+    dqn.fit(env, callbacks=[callbacks,s,logs], nb_steps=100000, action_repetition=2,
             log_interval=1e4, verbose=2)
- 
+    
+    global logInfo
+    pickle.dump(logInfo, open("training_info.pkl", "w"))
+    
     dqn.save_weights(w_file, overwrite=True)
     dqn.test(env, action_repetition=2, nb_episodes=30, visualize=False)
  
